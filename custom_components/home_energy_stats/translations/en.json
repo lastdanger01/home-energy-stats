@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up energy stats",
+        "description": "Pick the entities to track. The energy entity must have device class energy and state class total_increasing (usually a template sensor that sums your circuits).",
+        "data": {
+          "energy_entity": "Total energy entity",
+          "power_entity": "Power entity (optional)"
+        }
+      }
+    },
+    "error": {
+      "no_energy": "A total energy entity is required"
+    }
+  },
+  "services": {
+    "get_stats": {
+      "name": "Get stats",
+      "description": "Compute daily energy usage from the recorder long-term statistics.",
+      "fields": {
+        "energy_entity": "Total energy entity",
+        "power_entity": "Power entity",
+        "days": "Number of days"
+      }
+    },
+    "reload_card": {
+      "name": "Reload card",
+      "description": "Re-register the Lovelace card resources without restarting Home Assistant."
+    }
+  }
+}

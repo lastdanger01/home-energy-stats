@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "設定能源統計",
+        "description": "選擇要統計的實體。總用電量實體必須是 energy device class 且有 total_increasing state class（通常是 ch1+ch2 的模板感測器）。",
+        "data": {
+          "energy_entity": "總用電量實體",
+          "power_entity": "即時功率實體（選填）"
+        }
+      }
+    },
+    "error": {
+      "no_energy": "必須指定總用電量實體"
+    }
+  },
+  "services": {
+    "get_stats": {
+      "name": "取得統計",
+      "description": "從 recorder 長期統計計算每日用電量。",
+      "fields": {
+        "energy_entity": "總用電量實體",
+        "power_entity": "即時功率實體",
+        "days": "統計天數"
+      }
+    },
+    "reload_card": {
+      "name": "重新註冊卡片",
+      "description": "重新註冊 Lovelace 卡片資源，不需要重啟 HA。"
+    }
+  }
+}

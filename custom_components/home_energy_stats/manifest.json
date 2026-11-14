@@ -1,0 +1,12 @@
+{
+  "domain": "home_energy_stats",
+  "name": "Home Energy Stats",
+  "codeowners": ["@lastdanger01"],
+  "config_flow": true,
+  "documentation": "https://github.com/lastdanger01/home-energy-stats",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/lastdanger01/home-energy-stats/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}
