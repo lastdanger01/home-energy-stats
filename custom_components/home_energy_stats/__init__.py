@@ -143,7 +143,6 @@ async def async_build_stats(
         "energy_entity": ..., "power_entity": ...,
       }
     """
-    from homeassistant.components.recorder import get_instance, history
     from homeassistant.components.recorder.statistics import (
         list_statistic_ids,
         statistics_during_period,
@@ -153,9 +152,17 @@ async def async_build_stats(
     if not energy_entity:
         return {"days": [], "error": "尚未設定總用電量實體"}
 
+    # HA 的設定時區。用它切日才不會跟使用者看到的日期差一天。
+    tz = dt_util.get_time_zone(hass.config.time_zone) or dt_util.UTC
+
     try:
         # 確認這顆實體真的有被 recorder 記錄
-        known = {s["statistic_id"] for s in list_statistic_ids(hass)}
+        known = {
+            s["statistic_id"]
+            for s in await hass.async_add_executor_job(
+                list_statistic_ids, hass
+            )
+        }
     except Exception as err:  # noqa: BLE001
         # recorder 還沒就緒時不應該讓整合載入失敗
         _LOGGER.debug("recorder 尚未就緒：%s", err)
@@ -177,14 +184,17 @@ async def async_build_stats(
     if power_entity:
         stat_ids.add(power_entity)
 
-    rows = statistics_during_period(
+    # statistics_during_period 是同步的（會讀 sqlite），
+    # 放進 executor 才不會阻塞事件迴圈。
+    rows = await hass.async_add_executor_job(
+        statistics_during_period,
         hass,
         start,
         end,
-        statistic_ids=stat_ids,
-        period="hour",
-        units=None,
-        types=STATISTIC_TYPES,
+        stat_ids,
+        "hour",
+        None,
+        STATISTIC_TYPES,
     )
     energy_rows = rows.get(energy_entity, [])
     power_rows = rows.get(power_entity, []) if power_entity else []
@@ -193,7 +203,7 @@ async def async_build_stats(
     buckets: dict[str, dict[str, float]] = {}
     for row in energy_rows:
         when = dt_util.as_utc(row["start"])
-        day = when.astimezone(dt_util.DEFAULT_TIME_ZONE).strftime("%Y-%m-%d")
+        day = when.astimezone(tz).strftime("%Y-%m-%d")
         slot = buckets.setdefault(
             day, {"kwh": 0.0, "peak_w": 0.0, "mean_w_sum": 0.0, "hours": 0}
         )
@@ -205,7 +215,7 @@ async def async_build_stats(
 
     for row in power_rows:
         when = dt_util.as_utc(row["start"])
-        day = when.astimezone(dt_util.DEFAULT_TIME_ZONE).strftime("%Y-%m-%d")
+        day = when.astimezone(tz).strftime("%Y-%m-%d")
         slot = buckets.get(day)
         if slot is None:
             continue
