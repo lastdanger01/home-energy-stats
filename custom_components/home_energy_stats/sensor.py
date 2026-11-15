@@ -89,11 +89,16 @@ class EnergyStatsSensor(CoordinatorEntity, SensorEntity):
 
         if key == "peak":
             self._attr_device_class = SensorDeviceClass.POWER
+            self._attr_state_class = SensorStateClass.MEASUREMENT
         else:
-            self._attr_device_class = SensorDeviceClass.ENERGY
-        # 這些是「區間用量」的滾動值，不是單調遞增的計數器，
-        # 用 total_increasing 會讓 HA 的長期統計算出錯誤的差值。
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+            # **不能用 device_class: energy**。
+            # energy device class 只允許 total / total_increasing，
+            # 搭配 measurement 會被 HA 記警告：
+            # "state class 'measurement' which is impossible
+            #  considering device class ('energy')"。
+            # 這些是「區間用量」的滾動值，不是單調遞增的計數器，
+            # 所以不設 device_class，只留 unit。
+            self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
     def native_value(self):
@@ -125,6 +130,8 @@ class EnergyStatsDailyTable(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "每日用電明細"
     _attr_icon = "mdi:table"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
 
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator)

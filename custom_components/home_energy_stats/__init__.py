@@ -22,8 +22,8 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import Event, HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType
@@ -67,7 +67,22 @@ PLATFORM_SCHEMA = vol.Schema(
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """YAML 設定流程。整合本身不需要 YAML 設定也能工作。"""
     hass.data.setdefault(DOMAIN, {})
+    _async_register_startup_retry(hass)
     return True
+
+
+def _async_register_startup_retry(hass: HomeAssistant) -> None:
+    """在 HA 完全啟動後再註冊一次卡片資源。
+
+    實測教訓：整合 setup 的時機可能比 http / lovelace 早，
+    這時註冊靜態路徑會失敗，結果 card.js 404。
+    在 HA 啟動完成事件後補一次，才會穩。
+    """
+
+    async def _on_start(_event: Event) -> None:
+        await async_register_card(hass)
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_start)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -79,6 +94,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
     _register_services(hass)
     await async_register_card(hass)
+    _async_register_startup_retry(hass)
     # 一定要轉發，否則 sensor 實體不會建立
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
@@ -153,7 +169,7 @@ async def async_build_stats(
         return {"days": [], "error": "尚未設定總用電量實體"}
 
     # HA 的設定時區。用它切日才不會跟使用者看到的日期差一天。
-    tz = dt_util.get_time_zone(hass.config.time_zone) or dt_util.UTC
+    tz = dt_util.get_time_zone(hass.config.time_zone) or dt_util.get_default_time_zone()
 
     try:
         # 確認這顆實體真的有被 recorder 記錄
@@ -200,9 +216,12 @@ async def async_build_stats(
     power_rows = rows.get(power_entity, []) if power_entity else []
 
     # 每小時一格
+    # 注意：StatisticsRow 的 start/end 是 **float（epoch 秒）**，
+    # 不是 datetime。直接丟給 dt_util.as_utc() 會拋
+    # AttributeError: 'float' object has no attribute 'tzinfo'。
     buckets: dict[str, dict[str, float]] = {}
     for row in energy_rows:
-        when = dt_util.as_utc(row["start"])
+        when = dt_util.utc_from_timestamp(row["start"])
         day = when.astimezone(tz).strftime("%Y-%m-%d")
         slot = buckets.setdefault(
             day, {"kwh": 0.0, "peak_w": 0.0, "mean_w_sum": 0.0, "hours": 0}
@@ -214,7 +233,7 @@ async def async_build_stats(
         slot["hours"] += 1
 
     for row in power_rows:
-        when = dt_util.as_utc(row["start"])
+        when = dt_util.utc_from_timestamp(row["start"])
         day = when.astimezone(tz).strftime("%Y-%m-%d")
         slot = buckets.get(day)
         if slot is None:

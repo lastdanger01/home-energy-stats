@@ -9,9 +9,12 @@
   4. Lovelace 資源註冊（要兩條通道）
   5. 卡片設定解析出來源
 
-資源集合用 duck typing 取得：`hass.data["lovelace"]` 舊版是 dict、
-新版是 dataclass，能不能寫入用 `hasattr(resources, "async_create_item")` 判斷，
-不要用 isinstance（collection 的類別跨 HA 版本會變）。
+實測教訓（v1.0.2 → v1.0.3）：
+- 開機時 `hass.http` 已經就緒，但整合 setup 的時機仍可能太早。
+  所以除了 setup 當下註冊，還要**在 HA 完全啟動後再補一次**。
+- 資源集合用 duck typing 取得：`hass.data["lovelace"]` 舊版是 dict、
+  新版是 dataclass，能不能寫入用 `hasattr(resources, "async_create_item")` 判斷，
+  不要用 isinstance（collection 的類別跨 HA 版本會變）。
 """
 
 from __future__ import annotations
@@ -20,18 +23,21 @@ import logging
 from pathlib import Path
 
 from homeassistant.components.frontend import add_extra_js_url
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant
+from homeassistant.helpers.event import async_call_later
 
 _LOGGER = logging.getLogger(__name__)
 
 CARD_FILENAME = "home-energy-stats-card.js"
-CARD_VERSION = "1.0.0"
+CARD_VERSION = "1.0.3"
 # 靜態路徑前綴。必須跟整合 domain 一致，且不要跟其他整合重疊。
 STATIC_URL_PATH = "/home_energy_stats"
 CARD_URL = f"{STATIC_URL_PATH}/{CARD_FILENAME}"
 
 # 記錄已註冊的 extra module url，避免同一支檔案被載入兩次
 DATA_EXTRA_MODULES = "home_energy_stats_extra_modules"
+# 標記靜態路徑是否已註冊，避免重複註冊
+DATA_STATIC_REGISTERED = "home_energy_stats_static_registered"
 
 
 def _get_resources(hass: HomeAssistant):
@@ -45,31 +51,47 @@ def _get_resources(hass: HomeAssistant):
     return resources
 
 
-async def async_register_static_path(hass: HomeAssistant) -> None:
+async def async_register_static_path(hass: HomeAssistant) -> bool:
     """註冊卡片 JS 的靜態路徑。
 
     **沒有這一步，`/home_energy_stats/home-energy-stats-card.js` 會 404**，
     前端就會報 `Custom element doesn't exist`。
+
+    回傳 True 表示註冊成功。
     """
+    if hass.data.get(DATA_STATIC_REGISTERED):
+        return True
+
     www_dir = Path(__file__).parent / "www"
     if not (www_dir / CARD_FILENAME).exists():
         _LOGGER.error("卡片檔不存在：%s", www_dir / CARD_FILENAME)
-        return
+        return False
+
+    http = getattr(hass, "http", None)
+    if http is None:
+        _LOGGER.warning("hass.http 尚未就緒，稍後重試註冊靜態路徑")
+        return False
 
     try:
         from homeassistant.components.http import StaticPathConfig
 
-        await hass.http.async_register_static_paths(
+        await http.async_register_static_paths(
             [StaticPathConfig(STATIC_URL_PATH, str(www_dir), True)]
         )
     except ImportError:
         # HA 2024.7 以下
-        hass.http.register_static_path(STATIC_URL_PATH, str(www_dir))
+        try:
+            http.register_static_path(STATIC_URL_PATH, str(www_dir))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("註冊靜態路徑失敗：%s", err)
+            return False
     except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("註冊靜態路徑失敗（可能已註冊）：%s", err)
-        return
+        _LOGGER.warning("註冊靜態路徑失敗：%s", err)
+        return False
 
+    hass.data[DATA_STATIC_REGISTERED] = True
     _LOGGER.info("已註冊靜態路徑 %s → %s", STATIC_URL_PATH, www_dir)
+    return True
 
 
 def _add_extra_module(hass: HomeAssistant, url: str) -> None:
@@ -87,7 +109,7 @@ def _add_extra_module(hass: HomeAssistant, url: str) -> None:
             from homeassistant.components.frontend import remove_extra_js_url
 
             remove_extra_js_url(hass, old)
-        except (ImportError, Exception):  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             _LOGGER.debug("無法移除舊的 module url %s", old)
         known.discard(old)
 
@@ -104,14 +126,8 @@ def _add_extra_module(hass: HomeAssistant, url: str) -> None:
     known.add(url)
 
 
-async def async_register_card(hass: HomeAssistant) -> None:
-    """註冊卡片資源（靜態路徑 + 兩條通道）。"""
-    await async_register_static_path(hass)
-
-    # 通道 2：frontend extra_module_url（YAML mode 與 safety net）
-    _add_extra_module(hass, f"{CARD_URL}?v={CARD_VERSION}")
-
-    # 通道 1：Lovelace resource（storage mode）
+async def async_register_lovelace_resource(hass: HomeAssistant) -> None:
+    """註冊 Lovelace 資源（storage mode 用的那一條通道）。"""
     resources = _get_resources(hass)
     if resources is None or not hasattr(resources, "async_create_item"):
         _LOGGER.debug("Lovelace resources 尚未就緒，之後用 reload_card 服務補註冊")
@@ -136,3 +152,32 @@ async def async_register_card(hass: HomeAssistant) -> None:
 
     await resources.async_create_item({"res_type": "module", "url": url})
     _LOGGER.info("已註冊 Lovelace 卡片資源：%s", url)
+
+
+async def async_register_card(hass: HomeAssistant) -> None:
+    """註冊卡片資源（靜態路徑 + 兩條通道）。"""
+    ok = await async_register_static_path(hass)
+    if not ok:
+        # 稍後重試：HA 完全啟動後 http 與 lovelace 才真的可用
+        async_call_later(hass, 30, _async_retry_register)
+
+    # 通道 2：frontend extra_module_url（YAML mode 與 safety net）
+    _add_extra_module(hass, f"{CARD_URL}?v={CARD_VERSION}")
+
+    # 通道 1：Lovelace resource（storage mode）
+    await async_register_lovelace_resource(hass)
+
+
+async def _async_retry_register(hass: HomeAssistant) -> None:
+    """延遲後重試註冊（開機時機太早的保險）。"""
+    ok = await async_register_static_path(hass)
+    if ok:
+        await async_register_lovelace_resource(hass)
+        _LOGGER.info("延遲重試：卡片資源註冊完成")
+    else:
+        _LOGGER.warning("延遲重試仍無法註冊靜態路徑，請手動呼叫 home_energy_stats.reload_card")
+
+
+async def async_setup_card(hass: HomeAssistant, _event: Event | None = None) -> None:
+    """HA 完全啟動後再註冊一次，確保卡片一定可用。"""
+    await async_register_card(hass)

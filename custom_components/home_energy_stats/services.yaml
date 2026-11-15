@@ -1,0 +1,39 @@
+get_stats:
+  name: 取得統計
+  description: 從 recorder 長期統計計算每日用電量，結果寫入 hass.data。
+  fields:
+    energy_entity:
+      name: 總用電量實體
+      description: device class 為 energy、state class 為 total_increasing 的實體。
+      required: false
+      example: sensor.total_home_energy
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: energy
+    power_entity:
+      name: 即時功率實體
+      description: device class 為 power 的實體，用來算尖峰與平均功率。
+      required: false
+      example: sensor.total_home_power
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: power
+    days:
+      name: 統計天數
+      description: 要回溯幾天。
+      required: false
+      default: 30
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days
+
+reload_card:
+  name: 重新註冊卡片
+  description: 重新註冊 Lovelace 卡片資源與靜態路徑，不必重啟 Home Assistant。
