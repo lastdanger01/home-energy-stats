@@ -25,6 +25,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType
 
 from .card import async_register_card
@@ -34,6 +35,10 @@ from .const import (
     DOMAIN,
     STATISTIC_TYPES,
 )
+
+# 要轉發的平台。**沒有這行，sensor platform 永遠不會被載入**，
+# 整合會顯示 loaded 但一個實體都沒有。
+PLATFORMS: list[str] = ["sensor"]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,13 +79,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
     _register_services(hass)
     await async_register_card(hass)
+    # 一定要轉發，否則 sensor 實體不會建立
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """移除 config entry。"""
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    return True
+    return unloaded
 
 
 def _register_services(hass: HomeAssistant) -> None:
@@ -145,8 +153,14 @@ async def async_build_stats(
     if not energy_entity:
         return {"days": [], "error": "尚未設定總用電量實體"}
 
-    # 確認這顆實體真的有被 recorder 記錄
-    known = {s["statistic_id"] for s in list_statistic_ids(hass)}
+    try:
+        # 確認這顆實體真的有被 recorder 記錄
+        known = {s["statistic_id"] for s in list_statistic_ids(hass)}
+    except Exception as err:  # noqa: BLE001
+        # recorder 還沒就緒時不應該讓整合載入失敗
+        _LOGGER.debug("recorder 尚未就緒：%s", err)
+        return {"days": [], "error": "recorder 尚未就緒，稍後會自動重試"}
+
     if energy_entity not in known:
         return {
             "days": [],
@@ -172,7 +186,6 @@ async def async_build_stats(
         units=None,
         types=STATISTIC_TYPES,
     )
-
     energy_rows = rows.get(energy_entity, [])
     power_rows = rows.get(power_entity, []) if power_entity else []
 

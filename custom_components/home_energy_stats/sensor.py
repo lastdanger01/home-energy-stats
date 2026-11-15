@@ -26,8 +26,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.util import dt as dt_util
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+)
 
 from . import async_build_stats
 from .const import CONF_ENERGY_ENTITY, CONF_POWER_ENTITY, DOMAIN
@@ -35,6 +37,7 @@ from .const import CONF_ENERGY_ENTITY, CONF_POWER_ENTITY, DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(minutes=15)
+STATS_DAYS = 30
 
 
 async def async_setup_entry(
@@ -47,11 +50,16 @@ async def async_setup_entry(
         _LOGGER.error("沒有設定總用電量實體，無法建立統計")
         return
 
+    async def _async_update_data() -> dict:
+        return await async_build_stats(
+            hass, energy_entity, power_entity, STATS_DAYS
+        )
+
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
         name=f"{DOMAIN} stats",
-        update_method=_make_update(hass, energy_entity, power_entity),
+        update_method=_async_update_data,
         update_interval=SCAN_INTERVAL,
     )
     await coordinator.async_config_entry_first_refresh()
@@ -67,16 +75,7 @@ async def async_setup_entry(
     )
 
 
-def _make_update(hass, energy_entity, power_entity):
-    """建立 coordinator 的更新函式。"""
-
-    async def _update() -> dict:
-        return await async_build_stats(hass, energy_entity, power_entity, 30)
-
-    return _update
-
-
-class EnergyStatsSensor(SensorEntity, DataUpdateCoordinator):
+class EnergyStatsSensor(CoordinatorEntity, SensorEntity):
     """單一數值的統計感測器。"""
 
     _attr_has_entity_name = True
@@ -90,10 +89,11 @@ class EnergyStatsSensor(SensorEntity, DataUpdateCoordinator):
 
         if key == "peak":
             self._attr_device_class = SensorDeviceClass.POWER
-            self._attr_state_class = SensorStateClass.MEASUREMENT
         else:
             self._attr_device_class = SensorDeviceClass.ENERGY
-            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        # 這些是「區間用量」的滾動值，不是單調遞增的計數器，
+        # 用 total_increasing 會讓 HA 的長期統計算出錯誤的差值。
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
     def native_value(self):
@@ -105,7 +105,7 @@ class EnergyStatsSensor(SensorEntity, DataUpdateCoordinator):
             return data.get("peak_w")
         if self._key == "today":
             return days[-1]["kwh"]
-        n = 7 if self._key == "7d" else 30
+        n = 7 if self._key == "7d" else STATS_DAYS
         recent = days[-n:]
         return round(sum(d["kwh"] for d in recent), 3)
 
@@ -119,11 +119,12 @@ class EnergyStatsSensor(SensorEntity, DataUpdateCoordinator):
         }
 
 
-class EnergyStatsDailyTable(SensorEntity, DataUpdateCoordinator):
+class EnergyStatsDailyTable(CoordinatorEntity, SensorEntity):
     """每日明細表（把完整表格放在 attributes）。"""
 
     _attr_has_entity_name = True
     _attr_name = "每日用電明細"
+    _attr_icon = "mdi:table"
 
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator)
@@ -137,9 +138,8 @@ class EnergyStatsDailyTable(SensorEntity, DataUpdateCoordinator):
     @property
     def extra_state_attributes(self):
         data = self.coordinator.data or {}
-        days = data.get("days") or []
         return {
-            "days": days,
+            "days": data.get("days") or [],
             "total_kwh": data.get("total_kwh"),
             "avg_kwh": data.get("avg_kwh"),
             "peak_w": data.get("peak_w"),
